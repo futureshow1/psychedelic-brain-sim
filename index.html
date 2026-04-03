@@ -119,8 +119,8 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;hei
   <div class="ctrl-section">
     <div class="ptitle">Dose Level</div>
     <div class="slider-group">
-      <div class="slider-label"><span id="dose-label">Common</span><span class="slider-value" id="dose-value">--</span></div>
-      <input type="range" id="dose-slider" min="0" max="4" step="1" value="2">
+      <div class="slider-label"><span id="dose-label">Micro</span><span class="slider-value" id="dose-value">--</span></div>
+      <input type="range" id="dose-slider" min="0" max="4" step="1" value="0">
       <div class="dose-markers"><span>Micro</span><span>Threshold</span><span>Common</span><span>Strong</span><span>Heavy</span></div>
     </div>
   </div>
@@ -687,7 +687,7 @@ function toggleAudio() {
 let scene, camera, renderer, controls, brainGroup;
 let regionMeshes = {}, floatingLabels = {}, connectivityLines = [];
 let raycaster, mouse;
-let selectedRegion = null, currentSubstance = 'psilocybin', currentDose = 2, currentTime = 0;
+let selectedRegion = null, currentSubstance = 'psilocybin', currentDose = 0, currentTime = 0;
 let isPlaying = false, playInterval = null, showLabels = true, showConnectivity = false, autoRotate = false;
 let compareMode = false, compareSubstance = 'lsd';
 let scene2, camera2, renderer2, controls2, brainGroup2, regionMeshes2 = {};
