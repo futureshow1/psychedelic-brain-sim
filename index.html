@@ -464,8 +464,11 @@ let audioEnabled = false;
 let masterGain, padFilter, padFilter2, lfo, lfoGain, lfo2, lfo2Gain;
 let padOscs = [];
 let subBass, subBassGain;
-let convolver; // reverb
+let convolver, dryGain, reverbGain; // reverb
 let noiseNode, noiseGain; // psychedelic noise texture
+let regionOscMap = {}; // per-region reactive oscillators
+let lastPhaseIdx = -1; // for phase transition detection
+let interactBus, interactGain; // interactive sound bus
 
 const AUDIO_PROFILES = {
   lsd:       { base: 55,  pad: [1, 1.498, 2.003, 3.01, 4.98],  filter: 900,  filter2: 2200, lfoRate: 0.15, lfoDepth: 250, lfo2Rate: 0.37, resonance: 10, detune: 8,  type: 'sawtooth', subBass: 27.5, noiseAmt: 0.02, reverbMix: 0.6 },
@@ -511,14 +514,23 @@ function initAudio() {
 
   // Reverb
   convolver = createReverb(3.5, 2.5);
-  const reverbGain = audioCtx.createGain();
+  reverbGain = audioCtx.createGain();
   reverbGain.gain.value = 0.6;
   convolver.connect(reverbGain);
   reverbGain.connect(masterGain);
-  const dryGain = audioCtx.createGain();
+  dryGain = audioCtx.createGain();
   dryGain.gain.value = 0.5;
   dryGain.connect(masterGain);
   masterGain.connect(audioCtx.destination);
+
+  // Interactive sound bus (for clicks, hovers, transitions)
+  interactGain = audioCtx.createGain();
+  interactGain.gain.value = 0.3;
+  interactBus = audioCtx.createGain();
+  interactBus.gain.value = 1.0;
+  interactBus.connect(interactGain);
+  interactGain.connect(dryGain);
+  interactGain.connect(convolver);
 
   // Primary pad filter (lowpass)
   padFilter = audioCtx.createBiquadFilter();
@@ -659,6 +671,10 @@ function updateAudio() {
 
   // Noise texture — more at peak intensity
   noiseGain.gain.linearRampToValueAtTime(prof.noiseAmt * intensity, now + 0.3);
+
+  // Interactive layers
+  updateRegionOscillators();
+  checkPhaseTransition();
 }
 
 function toggleAudio() {
@@ -678,6 +694,306 @@ function toggleAudio() {
     btn.classList.remove('playing');
     indicator.style.display = 'none';
   }
+}
+
+// Auto-enable audio on first user interaction
+function ensureAudio() {
+  if (!audioCtx) initAudio();
+  if (!audioEnabled) {
+    audioEnabled = true;
+    audioCtx.resume();
+    const btn = document.getElementById('audio-btn');
+    const indicator = document.getElementById('audio-indicator');
+    btn.textContent = 'DISABLE AUDIO';
+    btn.classList.add('playing');
+    indicator.style.display = '';
+    masterGain.gain.linearRampToValueAtTime(0.06, audioCtx.currentTime + 1.5);
+  }
+}
+
+// ============================================================
+// INTERACTIVE SOUND EFFECTS
+// ============================================================
+
+// Region click — musical ping mapped to region position + substance
+function playRegionClick(regionId) {
+  if (!audioCtx || !audioEnabled) return;
+  const r = R[regionId];
+  const sub = S[currentSubstance];
+  const now = audioCtx.currentTime;
+
+  // Map region vertical position to pitch (higher position = higher note)
+  const yNorm = (r.pos[1] + 0.8) / 1.6; // normalize to 0-1
+  const baseNote = 220 + yNorm * 440; // A3 to A4 range
+  // Substance color shifts the pitch slightly
+  const col = new THREE.Color(sub.color);
+  const hueShift = col.getHSL({}).h * 60; // 0-60Hz offset
+
+  // Main tone
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(baseNote + hueShift, now);
+  osc.frequency.exponentialRampToValueAtTime(baseNote * 1.5 + hueShift, now + 0.08);
+  osc.frequency.exponentialRampToValueAtTime(baseNote + hueShift * 0.5, now + 0.6);
+  gain.gain.setValueAtTime(0.15, now);
+  gain.gain.exponentialRampToValueAtTime(0.08, now + 0.1);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+  osc.connect(gain);
+  gain.connect(interactBus);
+  osc.start(now);
+  osc.stop(now + 1.3);
+
+  // Harmonic overtone
+  const osc2 = audioCtx.createOscillator();
+  const gain2 = audioCtx.createGain();
+  osc2.type = 'triangle';
+  osc2.frequency.setValueAtTime(baseNote * 2.01, now);
+  osc2.frequency.exponentialRampToValueAtTime(baseNote * 3, now + 0.4);
+  gain2.gain.setValueAtTime(0.06, now);
+  gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+  osc2.connect(gain2);
+  gain2.connect(interactBus);
+  osc2.start(now);
+  osc2.stop(now + 0.9);
+
+  // Effect indicator — suppressed regions get descending tone, activated get ascending
+  const eff = sub.effects[regionId] || 0;
+  if (Math.abs(eff) > 0.2) {
+    const osc3 = audioCtx.createOscillator();
+    const gain3 = audioCtx.createGain();
+    osc3.type = 'sine';
+    const startF = eff > 0 ? baseNote * 0.8 : baseNote * 1.5;
+    const endF = eff > 0 ? baseNote * 1.8 : baseNote * 0.5;
+    osc3.frequency.setValueAtTime(startF, now + 0.05);
+    osc3.frequency.exponentialRampToValueAtTime(endF, now + 0.5);
+    gain3.gain.setValueAtTime(0.04 * Math.abs(eff), now + 0.05);
+    gain3.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    osc3.connect(gain3);
+    gain3.connect(interactBus);
+    osc3.start(now + 0.05);
+    osc3.stop(now + 0.8);
+  }
+}
+
+// Hover resonance — subtle harmonic when mouse is over a region
+let hoverOsc = null, hoverGain = null, hoveredRegion = null;
+function updateHoverSound(regionId) {
+  if (!audioCtx || !audioEnabled) return;
+  if (regionId === hoveredRegion) return;
+  hoveredRegion = regionId;
+
+  // Fade out old hover
+  if (hoverGain) {
+    hoverGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.15);
+    const oldOsc = hoverOsc, oldGain = hoverGain;
+    setTimeout(() => { try { oldOsc.stop(); } catch(e){} }, 200);
+    hoverOsc = null; hoverGain = null;
+  }
+
+  if (!regionId) return;
+  const r = R[regionId];
+  const sub = S[currentSubstance];
+  const eff = Math.abs((sub.effects[regionId] || 0) * [0.15,0.4,0.7,0.9,1.0][currentDose] * getTimeMultiplier(currentTime, sub));
+  if (eff < 0.05) return;
+
+  const yNorm = (r.pos[1] + 0.8) / 1.6;
+  const freq = 300 + yNorm * 300;
+
+  hoverOsc = audioCtx.createOscillator();
+  hoverGain = audioCtx.createGain();
+  hoverOsc.type = 'sine';
+  hoverOsc.frequency.value = freq;
+  hoverGain.gain.setValueAtTime(0, audioCtx.currentTime);
+  hoverGain.gain.linearRampToValueAtTime(0.02 * eff, audioCtx.currentTime + 0.2);
+  hoverOsc.connect(hoverGain);
+  hoverGain.connect(convolver);
+  hoverOsc.start();
+}
+
+// Phase transition chime — plays when crossing into a new phase
+function playPhaseTransition(phaseIdx) {
+  if (!audioCtx || !audioEnabled) return;
+  const now = audioCtx.currentTime;
+  // Each phase has a unique chord: onset=hopeful, peak=intense, plateau=floating, comedown=gentle, afterglow=ethereal
+  const chords = [
+    [261.6, 329.6, 392.0],   // onset: C major
+    [293.7, 370.0, 440.0, 554.4], // peak: D major + high
+    [349.2, 440.0, 523.3],   // plateau: F major
+    [392.0, 493.9, 587.3],   // comedown: G major
+    [440.0, 554.4, 659.3, 880.0]  // afterglow: A major + octave
+  ];
+  const notes = chords[phaseIdx] || chords[0];
+  notes.forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = i === 0 ? 'triangle' : 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    osc.frequency.linearRampToValueAtTime(freq * 1.003, now + 1.5); // slight drift
+    const delay = i * 0.08;
+    gain.gain.setValueAtTime(0, now + delay);
+    gain.gain.linearRampToValueAtTime(0.07 / (i + 1), now + delay + 0.1);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + delay + 2.5);
+    osc.connect(gain);
+    gain.connect(interactBus);
+    osc.start(now + delay);
+    osc.stop(now + delay + 2.6);
+  });
+
+  // Shimmer sweep
+  const sweep = audioCtx.createOscillator();
+  const sweepGain = audioCtx.createGain();
+  sweep.type = 'sawtooth';
+  sweep.frequency.setValueAtTime(2000, now);
+  sweep.frequency.exponentialRampToValueAtTime(200, now + 1.0);
+  sweepGain.gain.setValueAtTime(0.015, now);
+  sweepGain.gain.exponentialRampToValueAtTime(0.001, now + 1.0);
+  const sweepFilter = audioCtx.createBiquadFilter();
+  sweepFilter.type = 'bandpass';
+  sweepFilter.frequency.value = 1500;
+  sweepFilter.Q.value = 5;
+  sweep.connect(sweepFilter);
+  sweepFilter.connect(sweepGain);
+  sweepGain.connect(interactBus);
+  sweep.start(now);
+  sweep.stop(now + 1.1);
+}
+
+// Dose change — pitch sweep up or down
+function playDoseChange(newDose, oldDose) {
+  if (!audioCtx || !audioEnabled) return;
+  const now = audioCtx.currentTime;
+  const up = newDose > oldDose;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(up ? 200 : 500, now);
+  osc.frequency.exponentialRampToValueAtTime(up ? 500 : 200, now + 0.25);
+  gain.gain.setValueAtTime(0.06, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+  osc.connect(gain);
+  gain.connect(interactBus);
+  osc.start(now);
+  osc.stop(now + 0.5);
+
+  // Sub-thump on dose change
+  const sub = audioCtx.createOscillator();
+  const subG = audioCtx.createGain();
+  sub.type = 'sine';
+  sub.frequency.setValueAtTime(up ? 60 : 80, now);
+  sub.frequency.exponentialRampToValueAtTime(up ? 80 : 40, now + 0.15);
+  subG.gain.setValueAtTime(0.1, now);
+  subG.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+  sub.connect(subG);
+  subG.connect(masterGain);
+  sub.start(now);
+  sub.stop(now + 0.3);
+}
+
+// Substance switch — crossfade morph sound
+function playSubstanceSwitch(newSubKey) {
+  if (!audioCtx || !audioEnabled) return;
+  const now = audioCtx.currentTime;
+  const sub = S[newSubKey];
+  const col = new THREE.Color(sub.color);
+  const hsl = col.getHSL({});
+
+  // Map hue to a note in pentatonic scale
+  const pentatonic = [261.6, 293.7, 329.6, 392.0, 440.0, 523.3, 587.3, 659.3];
+  const noteIdx = Math.floor(hsl.h * pentatonic.length);
+  const baseFreq = pentatonic[noteIdx] || 440;
+
+  // Warm rising arpeggio (3 notes)
+  [1, 1.25, 1.5].forEach((mult, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = baseFreq * mult;
+    const d = i * 0.12;
+    gain.gain.setValueAtTime(0, now + d);
+    gain.gain.linearRampToValueAtTime(0.08, now + d + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + d + 0.8);
+    osc.connect(gain);
+    gain.connect(interactBus);
+    osc.start(now + d);
+    osc.stop(now + d + 0.9);
+  });
+
+  // Whoosh — filtered noise burst
+  const bufLen = audioCtx.sampleRate * 0.5;
+  const buf = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufLen; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufLen, 3);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const filt = audioCtx.createBiquadFilter();
+  filt.type = 'bandpass';
+  filt.frequency.setValueAtTime(3000, now);
+  filt.frequency.exponentialRampToValueAtTime(500, now + 0.4);
+  filt.Q.value = 3;
+  const nGain = audioCtx.createGain();
+  nGain.gain.setValueAtTime(0.06, now);
+  nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+  src.connect(filt);
+  filt.connect(nGain);
+  nGain.connect(interactBus);
+  src.start(now);
+}
+
+// Per-region reactive oscillators — each active region hums quietly
+function updateRegionOscillators() {
+  if (!audioCtx || !audioEnabled) return;
+  const sub = S[currentSubstance];
+  const doseMult = [0.15, 0.4, 0.7, 0.9, 1.0][currentDose];
+  const timeMult = getTimeMultiplier(currentTime, sub);
+  const now = audioCtx.currentTime;
+
+  for (const [id, r] of Object.entries(R)) {
+    const eff = Math.abs((sub.effects[id] || 0) * doseMult * timeMult);
+
+    if (eff > 0.1 && !regionOscMap[id]) {
+      // Create oscillator for this region
+      const yNorm = (r.pos[1] + 0.8) / 1.6;
+      const xNorm = (r.pos[0] + 0.6) / 1.2;
+      const freq = 150 + yNorm * 250 + xNorm * 50;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.value = 0;
+      osc.connect(gain);
+      gain.connect(convolver);
+      osc.start();
+      regionOscMap[id] = { osc, gain, freq };
+    }
+
+    if (regionOscMap[id]) {
+      if (eff < 0.05) {
+        // Remove quiet region
+        regionOscMap[id].gain.gain.linearRampToValueAtTime(0, now + 0.3);
+        const old = regionOscMap[id];
+        setTimeout(() => { try { old.osc.stop(); } catch(e){} }, 400);
+        delete regionOscMap[id];
+      } else {
+        // Update volume proportional to effect strength
+        const vol = eff * 0.008; // keep quiet — this is texture, not melody
+        regionOscMap[id].gain.gain.linearRampToValueAtTime(vol, now + 0.2);
+        // Slight frequency drift for organic feel
+        const drift = Math.sin(Date.now() * 0.0003 + regionOscMap[id].freq) * 3;
+        regionOscMap[id].osc.frequency.linearRampToValueAtTime(regionOscMap[id].freq + drift, now + 0.5);
+      }
+    }
+  }
+}
+
+// Check for phase transitions
+function checkPhaseTransition() {
+  if (!audioCtx || !audioEnabled) return;
+  const pi = getPhaseIdx(currentSubstance);
+  if (lastPhaseIdx !== -1 && pi !== lastPhaseIdx) {
+    playPhaseTransition(pi);
+  }
+  lastPhaseIdx = pi;
 }
 
 // ============================================================
@@ -1208,6 +1524,9 @@ function selectSubstance(id, autoplay) {
   updateTimePhases();
   updateSubstanceInfo();
   if (autoplay) {
+    ensureAudio(); // auto-enable sound on first click
+    playSubstanceSwitch(id);
+    lastPhaseIdx = -1; // reset phase tracking
     currentTime = 0;
     document.getElementById('time-slider').value = 0;
     updateTimeDisplay();
@@ -1303,9 +1622,11 @@ function onMouseMove(e) {
     tooltip.style.left = (e.clientX + 15) + 'px';
     tooltip.style.top = (e.clientY - 10) + 'px';
     renderer.domElement.style.cursor = 'pointer';
+    updateHoverSound(hits[0].id);
   } else {
     tooltip.style.display = 'none';
     renderer.domElement.style.cursor = 'grab';
+    updateHoverSound(null);
   }
 }
 
@@ -1320,6 +1641,7 @@ function onMouseClick() {
     hits.sort((a, b) => a.d - b.d);
     selectedRegion = hits[0].id;
     updateRegionInfo(selectedRegion);
+    playRegionClick(selectedRegion);
   }
 }
 
@@ -1356,7 +1678,7 @@ function togglePlay() {
   } else clearInterval(playInterval);
 }
 
-document.getElementById('dose-slider').addEventListener('input', function() { currentDose = parseInt(this.value); updateDoseDisplay(); if (selectedRegion) updateRegionInfo(selectedRegion); });
+document.getElementById('dose-slider').addEventListener('input', function() { const oldDose = currentDose; currentDose = parseInt(this.value); updateDoseDisplay(); if (selectedRegion) updateRegionInfo(selectedRegion); if (oldDose !== currentDose) playDoseChange(currentDose, oldDose); });
 document.getElementById('time-slider').addEventListener('input', function() { currentTime = parseFloat(this.value); if (isPlaying) togglePlay(); updateTimeDisplay(); if (selectedRegion) updateRegionInfo(selectedRegion); });
 
 // ============================================================
